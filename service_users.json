@@ -1,0 +1,29 @@
+[
+    {
+        "user_id": "user_alpha",
+        "schedule": "@daily",
+        "services": {
+            "youtube": {
+                "channel_id": "UC-lHJZR3Gqxm24_Vd_AJ5Yw",
+                "access_token": "your_access_token_for_user_alpha"
+            },
+            "reddit": {
+                "client_id": "user_alpha_reddit_client_id",
+                "client_secret": "user_alpha_reddit_client_secret",
+                "user_agent": "user_alpha_reddit_user_agent",
+                "username": "user_alpha_reddit_username",
+                "password": "user_alpha_reddit_password"
+            }
+        }
+    },
+    {
+        "user_id": "1",
+        "schedule": "@hourly",
+        "services": {
+            "youtube": {
+                "channel_id": "UCj_Gng2054tNxno4XP24t2g",
+                "access_token": ""
+            }
+        }
+    }
+]

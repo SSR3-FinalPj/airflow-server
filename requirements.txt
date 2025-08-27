@@ -1,0 +1,14 @@
+apache-airflow==2.9.2
+psycopg2-binary==2.9.9
+apache-airflow-providers-cncf-kubernetes>=7.4.0
+elasticsearch==8.13.2
+python-dotenv
+requests
+confluent-kafka
+google-api-python-client
+google-auth-oauthlib
+google-auth
+praw
+pandas
+virtualenv
+kubernetes

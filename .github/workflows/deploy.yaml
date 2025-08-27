@@ -1,0 +1,75 @@
+name: CI/CD - Build, Push, and Update ArgoCD Manifests
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    outputs:
+      IMAGE_TAG: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-2
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-session-name: ecrPushRole
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Read version
+        id: version
+        run: echo "tag=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ steps.login-ecr.outputs.registry }}/airflow:${{ steps.version.outputs.tag }} .
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/airflow:${{ steps.version.outputs.tag }}
+
+  cd:
+    needs: [ci]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitOps Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          repository: SSR3-FinalPj/devops   # 👈 여기 GitOps repo 지정
+          ref: main
+          token: ${{ secrets.PAT }}
+
+      - name: Update image.tag in values.yaml
+        uses: mikefarah/yq@master
+        env:
+          IMAGE_TAG: ${{ needs.ci.outputs.IMAGE_TAG }}
+        with:
+          cmd: yq eval -i '.image.tag = env(IMAGE_TAG)' './schedulerServer/values.yaml'
+          # YAML 파일을 편집하는 CLI 도구
+          # ai_value.yaml 안의 image.tag를 IMAGE_TAG 값으로 변경
+      - name: Commit manifest changes
+        env:
+          IMAGE_TAG: ${{ needs.ci.outputs.IMAGE_TAG }}
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add ./schedulerServer/values.yaml
+          git commit -m "ci: update python-app image tag to $IMAGE_TAG" || echo "No changes to commit"
+
+      - name: Push commit
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.PAT }}
+          repository: SSR3-FinalPj/devops
