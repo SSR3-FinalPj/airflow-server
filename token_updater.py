@@ -14,49 +14,75 @@ KAFKA_BROKERS = os.getenv("KAFKA_BROKERS")
 KAFKA_GOOGLE_TOPIC = os.getenv("KAFKA_GOOGLE_TOPIC")
 
 KAFKA_CONFIG = {
-    'bootstrap.servers': KAFKA_BROKERS,
-    'group.id': 'airflow-token-updater-group',
-    'auto.offset.reset': 'latest',
+    'bootstrap.servers': '219.255.15.170:9092,219.255.15.170:9093',
+    'group.id': 'airflow-token-updater-group12',
+    'auto.offset.reset': 'earliest',
 }
 KAFKA_TOPIC = KAFKA_GOOGLE_TOPIC
 
 
-def update_user_config(youtube_channel_id: str, new_user_id: int, new_access_token: str) -> bool:
+def update_user_config(payload: dict) -> bool:
     """
-    youtube_channel_id를 기준으로 사용자를 찾아 user_id와 access_token을 업데이트합니다.
+    Kafka payload 기반으로 service_users.json 업데이트
+    - user_id 없으면 추가
+    - provider 없으면 추가
+    - 있으면 access_token, channel_id 업데이트
     """
+    user_id = payload.get("userId")
+    provider = payload.get("provider")
+    access_token = payload.get("accessToken")
+    channel_id = payload.get("youtubeChannelId")  # 실제로는 공통 channelId
+
+    if not all([user_id, provider, access_token, channel_id]):
+        logging.warning("Payload missing required fields. Skipping.")
+        return False
+
     try:
-        with open(USERS_CONFIG_FILE, 'r+') as f:
-            all_users_config = json.load(f)
-            
-            user_found = False
-            for user_config in all_users_config:
-                if 'youtube' in user_config.get('services', {}) and \
-                   user_config['services']['youtube'].get('channel_id') == youtube_channel_id:
-                    
-                    logging.info(f"Found user for channel_id '{youtube_channel_id}'. Updating user_id and token.")
-                    # user_id와 access_token을 모두 업데이트
-                    user_config['user_id'] = new_user_id
-                    user_config['services']['youtube']['access_token'] = new_access_token
-                    user_found = True
-                    break
-            
-            if not user_found:
-                logging.warning(f"No user found for youtube_channel_id: {youtube_channel_id}")
-                return False
+        # JSON 파일 로드 (없으면 빈 리스트)
+        if not os.path.exists(USERS_CONFIG_FILE):
+            all_users_config = []
+        else:
+            with open(USERS_CONFIG_FILE, 'r') as f:
+                all_users_config = json.load(f)
 
-            f.seek(0)
+        # user_id 찾기
+        user_config = next((u for u in all_users_config if u["user_id"] == user_id), None)
+
+        if not user_config:
+            # 새로운 유저 추가
+            logging.info(f"Adding new user_id={user_id} with provider={provider}")
+            user_config = {
+                "user_id": user_id,
+                "schedule": "@hourly",
+                "services": {
+                    provider: {
+                        "channel_id": channel_id,
+                        "access_token": access_token
+                    }
+                }
+            }
+            all_users_config.append(user_config)
+        else:
+            # 기존 유저 → provider 확인
+            if provider not in user_config["services"]:
+                logging.info(f"Adding new provider={provider} for user_id={user_id}")
+                user_config["services"][provider] = {}
+
+            logging.info(f"Updating {provider} service for user_id={user_id}")
+            user_config["services"][provider]["channel_id"] = channel_id
+            user_config["services"][provider]["access_token"] = access_token
+
+        # 다시 저장
+        with open(USERS_CONFIG_FILE, 'w') as f:
             json.dump(all_users_config, f, indent=4)
-            f.truncate()
-            logging.info(f"Successfully updated config in {USERS_CONFIG_FILE}")
-            return True
 
-    except FileNotFoundError:
-        logging.error(f"Config file not found: {USERS_CONFIG_FILE}")
-        return False
+        logging.info(f"Successfully updated config in {USERS_CONFIG_FILE}")
+        return True
+
     except Exception as e:
-        logging.error(f"An unexpected error occurred while updating config: {e}")
+        logging.error(f"Error updating user config: {e}")
         return False
+
 
 def regenerate_dags():
     """
@@ -84,25 +110,18 @@ def main():
     try:
         while True:
             msg = consumer.poll(1.0)
-            if msg is None: continue
+            if msg is None:
+                continue
             if msg.error():
                 if msg.error().code() != KafkaException._PARTITION_EOF:
                     logging.error(f"Kafka error: {msg.error()}")
                 continue
-            
+
             try:
                 payload = json.loads(msg.value().decode('utf-8'))
                 logging.info(f"Received message: {json.dumps(payload, indent=2)}")
 
-                user_id = payload.get('userId')
-                access_token = payload.get('accessToken')
-                channel_id = payload.get('youtubeChannelId')
-
-                if not all([user_id, access_token, channel_id]):
-                    logging.warning("Message is missing 'userId', 'accessToken', or 'youtubeChannelId'. Skipping.")
-                    continue
-                
-                if update_user_config(channel_id, user_id, access_token):
+                if update_user_config(payload):
                     regenerate_dags()
 
             except Exception as e:

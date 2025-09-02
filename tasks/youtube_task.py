@@ -1,12 +1,15 @@
 import logging
 import json
 import os
+import pathlib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from confluent_kafka import Producer
 from elasticsearch import Elasticsearch
+from pathlib import Path
 
 # .env 파일에서 환경변수 로드
 load_dotenv()
@@ -21,10 +24,12 @@ ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD", "qwer1234")
 ELASTIC_HOST = os.getenv("ELASTIC_HOST", "http://219.255.15.170:9200/")
 ELASTIC_YOUTUBE_INDEX = "youtubedata"
 
+YT_COMMENTS_MAX = int(os.getenv("YT_COMMENTS_MAX", "50"))
+YT_COMMENTS_ORDER = os.getenv("YT_COMMENTS_ORDER", "relevance")
+
 logging.basicConfig(level=logging.INFO)
 
 # --- Helper Functions ---
-
 def get_es_client():
     return Elasticsearch(ELASTIC_HOST, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
 
@@ -35,7 +40,7 @@ def get_youtube_data_api_client():
     return build('youtube', 'v3', developerKey=API_KEY)
 
 def delivery_report(err, msg):
-    if err is not None:
+    if err:
         logging.error(f"Kafka delivery failed: {err}")
     else:
         logging.info(f"Kafka message delivered to {msg.topic()} [{msg.partition()}]")
@@ -53,17 +58,14 @@ def send_to_kafka(producer, topic, key, message):
         logging.error(f"Kafka 전송 실패: {e}")
 
 def format_analytics_table(analytics_data):
-    """columnHeaders / rows 형태를 [{col: value, ...}, ...] 로 변환"""
     headers = [h["name"] for h in analytics_data.get("columnHeaders", [])]
     rows = analytics_data.get("rows", [])
     return [dict(zip(headers, row)) for row in rows]
 
 def fetch_all_analytics_reports(access_token, channel_id):
-    """AccessToken으로 YouTube Analytics API 호출"""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     start_date = (datetime.utcnow() - timedelta(days=28)).strftime('%Y-%m-%d')
     analytics_url = "https://youtubeanalytics.googleapis.com/v2/reports"
-
     headers = {"Authorization": f"Bearer {access_token}"}
     results = {"channel_id": channel_id, "retrieved_date": today}
 
@@ -80,49 +82,95 @@ def fetch_all_analytics_reports(access_token, channel_id):
     ]
 
     for req in report_requests:
-        params = {
-            "ids": f"channel=={channel_id}",
-            "startDate": start_date,
-            "endDate": today,
-        }
+        params = {"ids": f"channel=={channel_id}", "startDate": start_date, "endDate": today}
         params.update(req["params"])
-
         logging.info(f"Fetching report: {req['name']}...")
         resp = requests.get(analytics_url, headers=headers, params=params)
-
         if resp.status_code == 401:
             logging.error(f"Access token expired for channel {channel_id}")
             return {"error": "token_expired"}
-
         if resp.status_code != 200:
             logging.error(f"Report '{req['name']}' failed. Status={resp.status_code}, Error={resp.text}")
             results[req['name']] = {"error": f"http_error_{resp.status_code}"}
             continue
-
         try:
             results[req['name']] = format_analytics_table(resp.json())
         except Exception as e:
             logging.error(f"Failed to parse report {req['name']}: {e}")
             results[req['name']] = {"error": "parse_error"}
-
     return results
 
+def extract_thumbnails(snippet):
+    thumbs = snippet.get('thumbnails', {}) or {}
+    return {k: {"url": v.get("url"), "width": v.get("width"), "height": v.get("height")} for k,v in thumbs.items() if v.get("url")}
+
+# 댓글 및 답글 수집 함수 (로컬 버전 반영)
+def fetch_video_comments(youtube_client, video_id, max_comments=50, order="relevance"):
+    comments = []
+    page_token = None
+    while len(comments) < max_comments:
+        try:
+            req = youtube_client.commentThreads().list(
+                part="snippet,replies",
+                videoId=video_id,
+                maxResults=min(100, max_comments-len(comments)),
+                pageToken=page_token,
+                order=order,
+                textFormat="plainText",
+            )
+            resp = req.execute()
+        except Exception as e:
+            logging.warning(f"댓글 수집 실패(video_id={video_id}): {e}")
+            break
+        for it in resp.get("items", []):
+            s = it.get("snippet", {}) or {}
+            top = (s.get("topLevelComment") or {}).get("snippet", {}) or {}
+            thread_id = it.get("id")
+            top_id = (s.get("topLevelComment") or {}).get("id") or thread_id
+            comment_obj = {
+                "thread_id": thread_id,
+                "comment_id": top_id,
+                "author": top.get("authorDisplayName"),
+                "author_channel_id": ((top.get("authorChannelId") or {}).get("value")),
+                "text": top.get("textDisplay") or top.get("textOriginal"),
+                "like_count": top.get("likeCount"),
+                "published_at": top.get("publishedAt"),
+                "updated_at": top.get("updatedAt"),
+                "reply_count": s.get("totalReplyCount", 0),
+                "replies": [],
+            }
+            comments.append(comment_obj)
+        page_token = resp.get("nextPageToken")
+        if not page_token: break
+    return comments
+
 def fetch_youtube_data(youtube_client, video_id):
-    video_response = youtube_client.videos().list(part='snippet,statistics,id', id=video_id).execute()
-    if not video_response.get('items'):
+    try:
+        video_response = youtube_client.videos().list(
+            part="snippet,statistics,contentDetails,status,topicDetails,recordingDetails,liveStreamingDetails,localizations",
+            id=video_id
+        ).execute()
+        if not video_response.get('items'):
+            return None
+        video = video_response['items'][0]
+        snippet = video.get('snippet', {})
+        stats = video.get('statistics', {})
+        return {
+            "title": snippet.get('title', ''),
+            "description": snippet.get('description', ''),
+            "video_id": video.get('id', ''),
+            "channel_id": snippet.get('channelId', ''),
+            "channel_title": snippet.get('channelTitle', ''),
+            "upload_date": snippet.get('publishedAt', ''),
+            "tags": snippet.get('tags', []),
+            "view_count": stats.get('viewCount'),
+            "like_count": stats.get('likeCount'),
+            "comment_count": stats.get('commentCount'),
+            "thumbnails": extract_thumbnails(snippet),
+        }
+    except Exception as e:
+        logging.error(f"Failed to fetch video data for {video_id}: {e}")
         return None
-    video = video_response['items'][0]
-    snippet, stats = video.get('snippet', {}), video.get('statistics', {})
-    return {
-        "title": snippet.get('title', ''),
-        "video_id": video.get('id', ''),
-        "channel_id": snippet.get('channelId', ''),
-        "channel_title": snippet.get('channelTitle', ''),
-        "upload_date": snippet.get('publishedAt', ''),
-        "view_count": stats.get('viewCount', 'N/A'),
-        "like_count": stats.get('likeCount', 'N/A'),
-        "comment_count": stats.get('commentCount', 'N/A'),
-    }
 
 def index_to_elasticsearch(es_client, data):
     try:
@@ -132,71 +180,74 @@ def index_to_elasticsearch(es_client, data):
         logging.error(f"Elasticsearch 색인 실패: {e}")
         return None
 
-# --- Main Task Function ---
+def fetch_all_video_ids(youtube_client, channel_id):
+    video_ids = []
+    next_page_token = None
+    while True:
+        search_response = youtube_client.search().list(
+            channelId=channel_id,
+            part="id",
+            order="date",
+            maxResults=50,
+            pageToken=next_page_token
+        ).execute()
+        for item in search_response.get('items', []):
+            if item.get('id', {}).get('kind') == 'youtube#video':
+                video_ids.append(item['id']['videoId'])
+        next_page_token = search_response.get('nextPageToken')
+        if not next_page_token:
+            break
+    return video_ids
 
+# --- Main Task ---
 def run_youtube_task(user_id, channel_id, access_token, **kwargs):
-    """한 명의 사용자에 대한 유튜브 데이터 수집 및 처리 Task"""
     logging.info(f"Starting YouTube task for user: {user_id}")
-    
-    # 1. 서비스 클라이언트 초기화
     es_client = get_es_client()
     kafka_producer = get_kafka_producer()
     youtube_data_client = get_youtube_data_api_client()
 
-    # 2. YouTube Analytics API (requests 기반)
-    all_analytics_reports = fetch_all_analytics_reports(access_token, channel_id)
+    # Analytics API
+    channel_analytics = fetch_all_analytics_reports(access_token, channel_id)
+    if channel_analytics.get("error") == "token_expired":
+        raise Exception(f"YouTube access token expired for user {user_id}.")
 
-    if all_analytics_reports.get("error") == "token_expired":
-        error_message = {"user_id": user_id, "service": "youtube", "error": "access_token_expired", "timestamp": datetime.now().isoformat()}
-        send_to_kafka(kafka_producer, KAFKA_ERROR_TOPIC, user_id, error_message)
-        kafka_producer.flush()
-        raise Exception(f"YouTube access token for user {user_id} has expired.")
-    
-    # 3. 처리할 동영상 목록 가져오기
+    # 영상 목록
     try:
-        search_response = youtube_data_client.search().list(
-            channelId=channel_id,
-            part="id",
-            order="date",
-            maxResults=5
-        ).execute()
-        video_ids_to_process = [
-            item['id']['videoId'] 
-            for item in search_response.get('items', []) 
-            if item.get('id', {}).get('kind') == 'youtube#video' and 'videoId' in item.get('id', {})
-        ]
-        logging.info(f"Found recent videos for user {user_id}: {video_ids_to_process}")
+        video_ids_to_process = fetch_all_video_ids(youtube_data_client, channel_id)
+        logging.info(f"총 {len(video_ids_to_process)}개의 영상을 가져왔습니다.")
     except Exception as e:
         logging.error(f"Failed to fetch video list for channel {channel_id}: {e}")
         return
 
-    # 4. 각 동영상 데이터 처리
+    videos = []
     for vid in video_ids_to_process:
-        logging.info(f"Processing video_id={vid} for user={user_id}")
-        data = fetch_youtube_data(youtube_data_client, vid)
-        if not data:
-            continue
-        
-        # Add the comprehensive channel analytics to each video document
-        data['channel_analytics'] = all_analytics_reports
-        data['processed_for_user'] = user_id
-        data['@timestamp'] = datetime.utcnow().isoformat()
+        video_data = fetch_youtube_data(youtube_data_client, vid)
+        if not video_data: continue
+        video_data['comments'] = fetch_video_comments(
+            youtube_data_client, vid, max_comments=YT_COMMENTS_MAX, order=YT_COMMENTS_ORDER
+        )
+        video_data['comments_collected'] = len(video_data['comments'])
+        videos.append(video_data)
 
-        doc_id = index_to_elasticsearch(es_client, data)
+    channel_document = {
+        "channel_id": channel_id,
+        "channel_title": (videos[0]["channel_title"] if videos else "unknown_channel"),
+        "@timestamp": datetime.utcnow().isoformat(),
+        "processed_for_user": user_id,
+        "channel_analytics": channel_analytics,
+        "videos": videos
+    }
 
-        if doc_id:
-            kafka_message = {
-                "es_doc_id": doc_id,
-                "user_id": user_id,
-                "youtube_id": data.get("video_id", ""),
-                "title": data.get("title", ""),
-                "indexed_at": datetime.now().isoformat(),
-                "comment_count": data.get("comment_count", 0),
-                "like_count": data.get("like_count", 0),
-                "view_count": data.get("view_count", 0),
-                "published_at": data.get("upload_date", ""),
-            }
-            send_to_kafka(kafka_producer, KAFKA_YOUTUBE_TOPIC, doc_id, kafka_message)
+    doc_id = index_to_elasticsearch(es_client, channel_document)
+
+    if doc_id:
+        kafka_message = {
+            "es_doc_id": doc_id,
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "indexed_at": datetime.now().isoformat()
+        }
+        send_to_kafka(kafka_producer, KAFKA_YOUTUBE_TOPIC, doc_id, kafka_message)
 
     kafka_producer.flush()
     logging.info(f"Finished YouTube task for user: {user_id}")

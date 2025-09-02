@@ -1,122 +1,149 @@
-
-
-import logging
-import json
 import os
+import json
+import requests
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
-import praw
-from confluent_kafka import Producer
 from elasticsearch import Elasticsearch
+from confluent_kafka import Producer
 
-# .env 파일에서 환경변수 로드
+# --- 환경 변수 로드 ---
 load_dotenv()
 
-# --- 전역 설정 ---
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "219.255.15.170:9092,219.255.15.170:9093")
-KAFKA_REDDIT_TOPIC = "redditdata"
+# --- 로깅 설정 ---
+logging.basicConfig(level=logging.INFO)
+
+# --- Elasticsearch 설정 ---
 ELASTIC_ID = os.getenv("ELASTIC_ID", "elastic")
 ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD", "qwer1234")
 ELASTIC_HOST = os.getenv("ELASTIC_HOST", "http://219.255.15.170:9200/")
-ELASTIC_REDDIT_INDEX = "redditdata"
+INDEX_NAME = "redditdata"
 
-logging.basicConfig(level=logging.INFO)
+# ES 클라이언트
+es = Elasticsearch(ELASTIC_HOST, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
 
-# --- Helper Functions ---
+# --- Kafka 설정 ---
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "219.255.15.170:9092,219.255.15.170:9093")
+KAFKA_TOPIC = "redditdata"
+producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
 
-def get_es_client():
-    return Elasticsearch(ELASTIC_HOST, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
+# --- Reddit API 호출 헬퍼 ---
+def reddit_get(endpoint, token, params=None):
+    headers = {
+        "Authorization": f"bearer {token}",
+        "User-Agent": "our-service/1.0"
+    }
+    url = f"https://oauth.reddit.com{endpoint}"
+    resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        logging.error(f"Reddit API 호출 실패: {resp.status_code} {resp.text}")
+        return None
+    return resp.json()
 
-def get_kafka_producer():
-    return Producer({'bootstrap.servers': KAFKA_BROKERS})
+# --- 댓글 트리 파싱 ---
+def parse_comments(comments, depth=0):
+    parsed = []
+    for c in comments:
+        if c["kind"] != "t1":
+            continue
+        data = c["data"]
+        replies = []
+        if data.get("replies") and isinstance(data["replies"], dict):
+            replies = parse_comments(data["replies"]["data"]["children"], depth + 1)
 
+        data["parsed_replies"] = replies
+        if 'replies' in data:
+            del data['replies']
+        parsed.append(data)
+    return parsed
+
+# --- Kafka 딜리버리 콜백 ---
 def delivery_report(err, msg):
     if err is not None:
         logging.error(f"Kafka delivery failed: {err}")
     else:
-        logging.info(f"Kafka message delivered to {msg.topic()} [{msg.partition()}]")
+        logging.info(f"Kafka message delivered to {msg.topic()} [{msg.partition()}] offset {msg.offset()}")
 
-def send_to_kafka(producer, topic, key, message):
-    try:
-        producer.produce(
-            topic=topic,
-            key=str(key),
-            value=json.dumps(message, ensure_ascii=False),
-            callback=delivery_report
-        )
-        producer.poll(0)
-    except Exception as e:
-        logging.error(f"Kafka 전송 실패: {e}")
+# --- 메인 로직 (Airflow Task에서 실행할 함수) ---
+def run_reddit_task(user_id, reddit_username, access_token, **kwargs):
+    """
+    특정 사용자에 대한 Reddit 데이터 수집 및 처리 Task
+    """
+    logging.info(f"Fetching all data for user: {reddit_username} (user_id: {user_id})")
 
-def index_to_elasticsearch(es_client, data):
-    try:
-        response = es_client.index(index=ELASTIC_REDDIT_INDEX, document=data)
-        return response['_id']
-    except Exception as e:
-        logging.error(f"Elasticsearch 색인 실패: {e}")
-        return None
+    all_posts_data = []
+    after = None
 
-# --- Main Task Function ---
+    # 1. 페이지네이션을 통해 모든 게시물과 댓글 수집
+    while True:
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
 
-def run_reddit_task(user_id, client_id, client_secret, user_agent, username, password, **kwargs):
-    """한 명의 사용자에 대한 Reddit 데이터 수집 및 처리 Task"""
-    logging.info(f"Starting Reddit task for user: {user_id}")
+        submissions = reddit_get(f"/user/{reddit_username}/submitted", access_token, params=params)
+        if not submissions or not submissions.get("data", {}).get("children"):
+            logging.info("No more submissions found.")
+            break
 
-    # 1. 서비스 클라이언트 초기화
-    es_client = get_es_client()
-    kafka_producer = get_kafka_producer()
-    try:
-        reddit_client = praw.Reddit(
-            client_id=client_id,
-            client_secret=client_secret,
-            user_agent=user_agent,
-            username=username,
-            password=password
-        )
-        # 인증 확인
-        logging.info(f"Successfully authenticated Reddit API for user: {reddit_client.user.me()}")
-    except Exception as e:
-        logging.error(f"Failed to authenticate Reddit API for user {user_id}: {e}")
-        # 필요시 Kafka로 인증 실패 알림을 보낼 수 있습니다.
+        for item in submissions["data"]["children"]:
+            if item["kind"] != "t3":
+                continue
+            s = item["data"]
+
+            comments_raw = reddit_get(f"/comments/{s['id']}", access_token, params={"limit": 500})
+            comments_data = []
+            if comments_raw and len(comments_raw) > 1:
+                comments_data = parse_comments(comments_raw[1]["data"]["children"])
+
+            s["parsed_comments"] = comments_data
+            all_posts_data.append(s)
+            logging.info(f"Collected post: {s['id']}")
+
+        after = submissions["data"].get("after")
+        if not after:
+            break
+
+    if not all_posts_data:
+        logging.info(f"No data collected for user {reddit_username}. Nothing to process.")
         return
 
-    # 2. 처리할 서브레딧 및 게시물 수 정의
-    subreddit_name = "korea" # 예시, 실제로는 사용자별 설정으로 변경 가능
-    limit = 20
+    # 2. 단일 문서 집계
+    final_document = {
+        "user_id": user_id,
+        "reddit_username": reddit_username,
+        "retrieved_at": datetime.now().isoformat(),
+        "post_count": len(all_posts_data),
+        "posts": all_posts_data,
+    }
 
-    # 3. 데이터 수집 및 처리
+    # 3. Elasticsearch에 색인
     try:
-        subreddit = reddit_client.subreddit(subreddit_name)
-        for submission in subreddit.hot(limit=limit):
-            data = {
-                "id": submission.id,
-                "title": submission.title,
-                "score": submission.score,
-                "url": submission.url,
-                "num_comments": submission.num_comments,
-                "created_utc": submission.created_utc,
-                "selftext": submission.selftext,
-                "subreddit": subreddit_name,
-                "processed_for_user": user_id,
-                "@timestamp": datetime.utcnow().isoformat()
-            }
-            
-            doc_id = index_to_elasticsearch(es_client, data)
-
-            if doc_id:
-                kafka_message = {
-                    "es_doc_id": doc_id,
-                    "user_id": user_id,
-                    "reddit_id": submission.id,
-                    "subreddit": subreddit_name,
-                    "title": submission.title,
-                    "indexed_at": datetime.now().isoformat()
-                }
-                send_to_kafka(kafka_producer, KAFKA_REDDIT_TOPIC, doc_id, kafka_message)
-
+        resp = es.index(index=INDEX_NAME, document=final_document)
+        doc_id = resp["_id"]
+        logging.info(f"Successfully indexed single document for user {reddit_username}. ES doc ID: {doc_id}")
     except Exception as e:
-        logging.error(f"Failed to fetch/process data from Reddit for user {user_id}: {e}")
+        logging.error(f"Elasticsearch indexing failed for user {reddit_username}: {e}")
+        return
 
-    finally:
-        kafka_producer.flush()
-        logging.info(f"Finished Reddit task for user: {user_id}")
+    # 4. Kafka 메시지 전송
+    try:
+        message = {
+            "es_doc_id": doc_id,
+            "user_id": user_id,
+            "channel_id": reddit_username,
+            "indexed_at": datetime.now().isoformat(),
+        }
+        producer.produce(
+            topic=KAFKA_TOPIC,
+            key=doc_id,
+            value=json.dumps(message, ensure_ascii=False),
+            callback=delivery_report,
+        )
+        producer.flush()
+        logging.info(f"Successfully sent Kafka message for user {reddit_username}")
+    except Exception as e:
+        logging.error(f"Kafka produce failed for user {reddit_username}: {e}")
+
+    logging.info(
+        f"완료: 총 {len(all_posts_data)}개 게시글 데이터를 단일 문서로 처리 및 전송 완료 (사용자: {reddit_username})"
+    )
