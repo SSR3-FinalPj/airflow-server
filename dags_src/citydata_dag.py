@@ -14,7 +14,7 @@ from kubernetes import client, config
 VERSION_FILE = os.path.join(os.path.dirname(__file__), "..", "VERSION")
 with open(VERSION_FILE, "r") as vf:
     IMAGE_VERSION = vf.read().strip()
-IMAGE = f"805400277714.dkr.ecr.us-east-2.amazonaws.com/airflow:{IMAGE_VERSION}"
+    IMAGE = f"805400277714.dkr.ecr.us-east-2.amazonaws.com/airflow:{IMAGE_VERSION}"
 load_dotenv()
 
 # -------------------- 
@@ -240,13 +240,5 @@ with DAG(
 
     task_fetch_citydata = PythonOperator(
         task_id='fetch_and_process_citydata',
-        python_callable=run_all,
-        executor_config={
-            "KubernetesExecutor": {
-                "namespace": "dev-system",
-                "image": IMAGE,
-                "image_pull_policy": "Always",
-                "serviceAccountName": "airflow-service-sa"
-            }
-        }
+        python_callable=run_all
     )
