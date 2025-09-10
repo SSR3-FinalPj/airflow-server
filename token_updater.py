@@ -37,6 +37,12 @@ def update_user_config(payload: dict) -> bool:
         logging.warning("Payload missing required fields. Skipping.")
         return False
 
+    # provider 변환: google -> youtube
+    if provider == "google":
+        provider_key = "youtube"
+    else:
+        provider_key = provider
+
     try:
         # JSON 파일 로드 (없으면 빈 리스트)
         if not os.path.exists(USERS_CONFIG_FILE):
@@ -50,12 +56,12 @@ def update_user_config(payload: dict) -> bool:
 
         if not user_config:
             # 새로운 유저 추가
-            logging.info(f"Adding new user_id={user_id} with provider={provider}")
+            logging.info(f"Adding new user_id={user_id} with provider={provider_key}")
             user_config = {
                 "user_id": user_id,
                 "schedule": "@hourly",
                 "services": {
-                    provider: {
+                    provider_key: {
                         "channel_id": channel_id,
                         "access_token": access_token
                     }
@@ -64,13 +70,13 @@ def update_user_config(payload: dict) -> bool:
             all_users_config.append(user_config)
         else:
             # 기존 유저 → provider 확인
-            if provider not in user_config["services"]:
-                logging.info(f"Adding new provider={provider} for user_id={user_id}")
-                user_config["services"][provider] = {}
+            if provider_key not in user_config["services"]:
+                logging.info(f"Adding new provider={provider_key} for user_id={user_id}")
+                user_config["services"][provider_key] = {}
 
-            logging.info(f"Updating {provider} service for user_id={user_id}")
-            user_config["services"][provider]["channel_id"] = channel_id
-            user_config["services"][provider]["access_token"] = access_token
+            logging.info(f"Updating {provider_key} service for user_id={user_id}")
+            user_config["services"][provider_key]["channel_id"] = channel_id
+            user_config["services"][provider_key]["access_token"] = access_token
 
         # 다시 저장
         with open(USERS_CONFIG_FILE, 'w') as f:
