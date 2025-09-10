@@ -14,16 +14,16 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 # --- Elasticsearch 설정 ---
-ELASTIC_ID = os.getenv("ELASTIC_ID", "elastic")
-ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD", "qwer1234")
-ELASTIC_HOST = os.getenv("ELASTIC_HOST", "http://219.255.15.170:9200/")
+ELASTIC_ID = os.getenv("ELASTIC_ID")
+ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD")
+ELASTIC_URL = os.getenv("ELASTIC_URL")
 INDEX_NAME = "redditdata"
 
 # ES 클라이언트
-es = Elasticsearch(ELASTIC_HOST, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
+es = Elasticsearch(ELASTIC_URL, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
 
 # --- Kafka 설정 ---
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "219.255.15.170:9092,219.255.15.170:9093")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS")
 KAFKA_TOPIC = "redditdata"
 producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
 

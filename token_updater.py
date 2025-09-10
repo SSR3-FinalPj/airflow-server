@@ -14,8 +14,8 @@ KAFKA_BROKERS = os.getenv("KAFKA_BROKERS")
 KAFKA_GOOGLE_TOPIC = os.getenv("KAFKA_GOOGLE_TOPIC")
 
 KAFKA_CONFIG = {
-    'bootstrap.servers': '219.255.15.170:9092,219.255.15.170:9093',
-    'group.id': 'airflow-token-updater-group12',
+    'bootstrap.servers': KAFKA_BROKERS,
+    'group.id': 'airflow-token-updater-group',
     'auto.offset.reset': 'earliest',
 }
 KAFKA_TOPIC = KAFKA_GOOGLE_TOPIC

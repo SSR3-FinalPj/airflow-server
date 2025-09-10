@@ -16,12 +16,12 @@ load_dotenv()
 
 # --- 전역 설정 ---
 API_KEY = os.getenv("YOUTUBE_API_KEY")
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "219.255.15.170:9092,219.255.15.170:9093")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS")
 KAFKA_YOUTUBE_TOPIC = "youtubedata"
 KAFKA_ERROR_TOPIC = "youtube_token_errors"
-ELASTIC_ID = os.getenv("ELASTIC_ID", "elastic")
-ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD", "qwer1234")
-ELASTIC_HOST = os.getenv("ELASTIC_HOST", "http://219.255.15.170:9200/")
+ELASTIC_ID = os.getenv("ELASTIC_ID")
+ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD")
+ELASTIC_URL = os.getenv("ELASTIC_URL")
 ELASTIC_YOUTUBE_INDEX = "youtubedata"
 
 YT_COMMENTS_MAX = int(os.getenv("YT_COMMENTS_MAX", "50"))
@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 
 # --- Helper Functions ---
 def get_es_client():
-    return Elasticsearch(ELASTIC_HOST, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
+    return Elasticsearch(ELASTIC_URL, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
 
 def get_kafka_producer():
     return Producer({'bootstrap.servers': KAFKA_BROKERS})
