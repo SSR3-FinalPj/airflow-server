@@ -230,7 +230,48 @@ def fetch_all_video_ids(youtube_client, channel_id):
         if not next_page_token:
             break
     return video_ids
-
+def fetch_channel_details(youtube_client, channel_id):
+    try:
+        channel_response = youtube_client.channels().list(
+            part="snippet,statistics,contentDetails,brandingSettings,status,topicDetails,localizations",
+            id=channel_id
+        ).execute()
+        if channel_response.get('items'):
+            channel_item = channel_response['items'][0]
+            snippet = channel_item.get('snippet', {})
+            stats = channel_item.get('statistics', {})
+            branding = channel_item.get('brandingSettings', {})
+            
+            channel_details = {
+                "title": snippet.get("title"),
+                "description": snippet.get("description"),
+                "custom_url": snippet.get("customUrl"),
+                "published_at": snippet.get("publishedAt"),
+                "thumbnails": extract_thumbnails(snippet),
+                "country": snippet.get("country"),
+                "statistics": {
+                    "view_count": int(stats.get("viewCount", 0)),
+                    "subscriber_count": int(stats.get("subscriberCount", 0)),
+                    "hidden_subscriber_count": stats.get("hiddenSubscriberCount", False),
+                    "video_count": int(stats.get("videoCount", 0)),
+                },
+                "branding": {
+                    "title": (branding.get("channel") or {}).get("title"),
+                    "description": (branding.get("channel") or {}).get("description"),
+                    "keywords": (branding.get("channel") or {}).get("keywords"),
+                    "banner_url": (branding.get("image") or {}).get("bannerExternalUrl"),
+                },
+                "status": channel_item.get("status", {}),
+                "topic_details": channel_item.get("topicDetails", {}),
+                "localizations": channel_item.get("localizations", {}),
+                "content_details": channel_item.get("contentDetails", {}),
+            }
+            return channel_details, channel_details["statistics"]
+        return {}, {}
+    except Exception as e:
+        logging.warning(f"Failed to fetch channel details: {e}")
+        return {}, {}
+    
 # --- Main Task ---
 def run_youtube_task(user_id, channel_id, access_token, **kwargs):
     logging.info(f"Starting YouTube task for user: {user_id}")
@@ -260,13 +301,15 @@ def run_youtube_task(user_id, channel_id, access_token, **kwargs):
         )
         video_data['comments_collected'] = len(video_data['comments'])
         videos.append(video_data)
-
+    channel_details, channel_stats = fetch_channel_details(youtube_data_client, channel_id)
     channel_document = {
         "channel_id": channel_id,
         "channel_title": (videos[0]["channel_title"] if videos else "unknown_channel"),
         "@timestamp": datetime.utcnow().isoformat(),
         "processed_for_user": user_id,
         "channel_analytics": channel_analytics,
+        "channel_details": channel_details,
+        "channel_stats": channel_stats,
         "videos": videos
     }
 
