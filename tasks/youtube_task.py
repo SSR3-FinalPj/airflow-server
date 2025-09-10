@@ -61,14 +61,36 @@ def format_analytics_table(analytics_data, report_name=None):
     headers = [h["name"] for h in analytics_data.get("columnHeaders", [])]
     rows = analytics_data.get("rows", [])
     formatted = []
+
+    # 리포트별 float 강제 캐스팅 대상 필드 정의
+    float_fields_by_report = {
+        "demographics": ["viewerPercentage"],
+        "daily_analytics": ["averageViewPercentage", "averageViewDuration"],
+        # 다른 리포트에서 추후 문제되면 여기에 추가
+    }
+
     for row in rows:
         row_dict = dict(zip(headers, row))
-        # demographics 보고서의 viewerPercentage는 무조건 float으로 변환
-        if report_name == "demographics" and "viewerPercentage" in row_dict:
-            try:
-                row_dict["viewerPercentage"] = float(row_dict["viewerPercentage"])
-            except Exception:
-                pass
+
+        # 공통 규칙: 이름에 "Percentage"나 "Duration" 들어가면 float으로 캐스팅
+        for k, v in list(row_dict.items()):
+            if isinstance(v, (int, str)) and (
+                "Percentage" in k or "Duration" in k or "Rate" in k
+            ):
+                try:
+                    row_dict[k] = float(v)
+                except Exception:
+                    pass
+
+        # 리포트별 명시적 처리 (보강)
+        if report_name in float_fields_by_report:
+            for fld in float_fields_by_report[report_name]:
+                if fld in row_dict:
+                    try:
+                        row_dict[fld] = float(row_dict[fld])
+                    except Exception:
+                        pass
+
         formatted.append(row_dict)
     return formatted
 
