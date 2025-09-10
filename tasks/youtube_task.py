@@ -57,10 +57,20 @@ def send_to_kafka(producer, topic, key, message):
     except Exception as e:
         logging.error(f"Kafka 전송 실패: {e}")
 
-def format_analytics_table(analytics_data):
+def format_analytics_table(analytics_data, report_name=None):
     headers = [h["name"] for h in analytics_data.get("columnHeaders", [])]
     rows = analytics_data.get("rows", [])
-    return [dict(zip(headers, row)) for row in rows]
+    formatted = []
+    for row in rows:
+        row_dict = dict(zip(headers, row))
+        # demographics 보고서의 viewerPercentage는 무조건 float으로 변환
+        if report_name == "demographics" and "viewerPercentage" in row_dict:
+            try:
+                row_dict["viewerPercentage"] = float(row_dict["viewerPercentage"])
+            except Exception:
+                pass
+        formatted.append(row_dict)
+    return formatted
 
 def fetch_all_analytics_reports(access_token, channel_id):
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -94,7 +104,7 @@ def fetch_all_analytics_reports(access_token, channel_id):
             results[req['name']] = {"error": f"http_error_{resp.status_code}"}
             continue
         try:
-            results[req['name']] = format_analytics_table(resp.json())
+            results[req['name']] = format_analytics_table(resp.json(), report_name=req['name'])
         except Exception as e:
             logging.error(f"Failed to parse report {req['name']}: {e}")
             results[req['name']] = {"error": "parse_error"}
