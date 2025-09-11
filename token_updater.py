@@ -119,8 +119,7 @@ def main():
             if msg is None:
                 continue
             if msg.error():
-                if msg.error().code() != KafkaException._PARTITION_EOF:
-                    logging.error(f"Kafka error: {msg.error()}")
+                logging.error(f"Kafka error: {msg.error()}")
                 continue
 
             try:
