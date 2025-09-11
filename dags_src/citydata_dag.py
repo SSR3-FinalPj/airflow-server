@@ -126,7 +126,7 @@ def delete_crashloop_pods():
 # -------------------- 
 # Citydata 처리 함수
 # -------------------- 
-def fetch_process_save_index_produce(poi_code, timestamp_str):
+def fetch_process_save_index_produce(poi_code, timestamp_str, timestamp):
     API_KEY = os.getenv("SEOUL_API_KEY")
     url = BASE_URL.format(API_KEY=API_KEY, code=poi_code)
     json_raw_path = os.path.join(RAW_DIR, f"POI{poi_code}.json")
@@ -169,6 +169,7 @@ def fetch_process_save_index_produce(poi_code, timestamp_str):
         return False
 
     try:
+        filtered["INDEXED_AT"] = timestamp
         response = es.index(index="citydata", document=filtered)
         doc_id = response.get('_id')
         logging.info(f"✅ Elasticsearch 색인 성공: POI{poi_code}")
@@ -203,10 +204,11 @@ def fetch_process_save_index_produce(poi_code, timestamp_str):
 # -------------------- 
 def run_all():
     timestamp_str = datetime.now().strftime("%y%m%d%H%M")
+    timestamp = datetime.now()
     logging.info(f"🔄 {timestamp_str} 기준 데이터 요청 및 처리 시작...")
 
     for code in poi_codes:
-        fetch_process_save_index_produce(code, timestamp_str)
+        fetch_process_save_index_produce(code, timestamp_str, timestamp)
     
     producer = Producer({'bootstrap.servers': KAFKA_BROKERS})
 
