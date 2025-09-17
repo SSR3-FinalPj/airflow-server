@@ -69,6 +69,7 @@ def create_dag_file(user_config: dict):
     if "reddit" in user_config["services"]:
         rd_config = user_config["services"]["reddit"]
         rd_config['user_id'] = user_id # op_kwargs에 user_id 추가
+        rd_config['reddit_username'] = rd_config.pop('channel_id')
         op_kwargs_str = json.dumps(rd_config)
         tasks_code.append(REDDIT_TASK_TEMPLATE.format(op_kwargs=op_kwargs_str))
 
