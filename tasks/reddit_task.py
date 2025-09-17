@@ -135,10 +135,11 @@ def run_reddit_task(user_id, reddit_username, access_token, **kwargs):
         }
         producer.produce(
             topic=KAFKA_TOPIC,
-            key=doc_id,
+            key=str(doc_id),
             value=json.dumps(message, ensure_ascii=False),
             callback=delivery_report,
         )
+        producer.poll(0)
         producer.flush()
         logging.info(f"Successfully sent Kafka message for user {reddit_username}")
     except Exception as e:
