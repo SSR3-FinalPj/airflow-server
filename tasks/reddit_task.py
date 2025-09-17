@@ -25,7 +25,6 @@ es = Elasticsearch(ELASTIC_URL, basic_auth=(ELASTIC_ID, ELASTIC_PASSWORD))
 # --- Kafka 설정 ---
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS")
 KAFKA_TOPIC = "redditdata"
-producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
 
 # --- Reddit API 호출 헬퍼 ---
 def reddit_get(endpoint, token, params=None):
@@ -70,7 +69,7 @@ def run_reddit_task(user_id, reddit_username, access_token, **kwargs):
     특정 사용자에 대한 Reddit 데이터 수집 및 처리 Task
     """
     logging.info(f"Fetching all data for user: {reddit_username} (user_id: {user_id})")
-
+    producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
     all_posts_data = []
     after = None
 
